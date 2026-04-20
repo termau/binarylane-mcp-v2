@@ -424,4 +424,4 @@ All destructive operations logged to stderr:
 - **Dependencies:** MCP SDK, ssh2, vitest (dev)
 - **Custom skills:** /bl-test, /bl-build, /bl-search, /bl-status
 - **Persistent log:** ~/.config/binarylane/mcp-v2.log
-- **Blog post:** Published as post #29 on wp.adamhomenet.com
+- **Blog post:** Published (post #29)

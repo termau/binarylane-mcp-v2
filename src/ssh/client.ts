@@ -17,6 +17,8 @@ import {
 
 export class SSHClientManager {
   private connections: Map<string, SSHConnection> = new Map();
+  private defaultPrivateKeyPath?: string;
+  private defaultUsername: string = 'root';
 
   /**
    * Load connections from multiple sources.
@@ -65,6 +67,10 @@ export class SSHClientManager {
         }
       }
     }
+
+    // Store defaults for ephemeral connections
+    this.defaultPrivateKeyPath = config.binarylane.defaultPrivateKeyPath?.replace(/^~/, homedir());
+    this.defaultUsername = config.binarylane.defaultUsername || 'root';
 
     this.loadConnections([configConns, envConns, blConns]);
   }
@@ -174,12 +180,13 @@ export class SSHClientManager {
       for (const c of this.connections.values()) {
         if (c.host === target) return c;
       }
-      // Create ephemeral connection for direct IP
+      // Create ephemeral connection for direct IP, using BinaryLane defaults
       return {
         name: target,
         host: target,
         port: 22,
-        username: 'root',
+        username: this.defaultUsername,
+        privateKeyPath: this.defaultPrivateKeyPath,
       };
     }
 
