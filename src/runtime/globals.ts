@@ -47,8 +47,18 @@ function createBlInterface(client: BinaryLaneClient, safety: SafetyInterceptor) 
     const boundMethod = (client as any)[name].bind(client);
 
     bl[name] = (...args: unknown[]) => {
-      safety.trackCall(`bl.${name}`, args);
-      return boundMethod(...args);
+      const record = safety.trackCall(`bl.${name}`, args);
+      const result = boundMethod(...args);
+      // If async, track completion/failure
+      if (result && typeof result === 'object' && typeof result.then === 'function') {
+        result.then(
+          () => safety.completeCall(record),
+          (e: Error) => safety.failCall(record, e.message),
+        );
+      } else {
+        safety.completeCall(record);
+      }
+      return result;
     };
   }
 
@@ -67,32 +77,35 @@ export function buildSandboxGlobals(
 ) {
   const bl = createBlInterface(blClient, safety);
 
+  // Helper: wrap an async SSH method with call tracking
+  function trackedSsh<T extends (...args: any[]) => Promise<any>>(
+    name: string, fn: T
+  ): T {
+    return ((...args: any[]) => {
+      const record = safety.trackCall(`ssh.${name}`, args);
+      const result = fn(...args);
+      result.then(
+        () => safety.completeCall(record),
+        (e: Error) => safety.failCall(record, e.message),
+      );
+      return result;
+    }) as T;
+  }
+
   const ssh: SandboxSSH = {
-    run: (...args: Parameters<SSHClientManager['run']>) => {
-      safety.trackCall('ssh.run', args);
-      return sshClient.run(...args);
+    run: trackedSsh('run', sshClient.run.bind(sshClient)),
+    readFile: trackedSsh('readFile', sshClient.readFile.bind(sshClient)),
+    writeFile: trackedSsh('writeFile', sshClient.writeFile.bind(sshClient)),
+    listDir: trackedSsh('listDir', sshClient.listDir.bind(sshClient)),
+    upload: trackedSsh('upload', sshClient.upload.bind(sshClient)),
+    download: trackedSsh('download', sshClient.download.bind(sshClient)),
+    connections: () => {
+      const record = safety.trackCall('ssh.connections', []);
+      const result = sshClient.listConnections();
+      safety.completeCall(record);
+      return result;
     },
-    readFile: (...args: Parameters<SSHClientManager['readFile']>) => {
-      return sshClient.readFile(...args);
-    },
-    writeFile: (...args: Parameters<SSHClientManager['writeFile']>) => {
-      safety.trackCall('ssh.writeFile', args);
-      return sshClient.writeFile(...args);
-    },
-    listDir: (...args: Parameters<SSHClientManager['listDir']>) => {
-      return sshClient.listDir(...args);
-    },
-    upload: (...args: Parameters<SSHClientManager['upload']>) => {
-      safety.trackCall('ssh.upload', args);
-      return sshClient.upload(...args);
-    },
-    download: (...args: Parameters<SSHClientManager['download']>) => {
-      return sshClient.download(...args);
-    },
-    connections: () => sshClient.listConnections(),
-    testConnection: (...args: Parameters<SSHClientManager['testConnection']>) => {
-      return sshClient.testConnection(...args);
-    },
+    testConnection: trackedSsh('testConnection', sshClient.testConnection.bind(sshClient)),
   };
 
   const formatArg = (a: unknown) =>

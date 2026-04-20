@@ -231,8 +231,93 @@ describe('SafetyInterceptor', () => {
     });
   });
 
+  describe('call tracking', () => {
+    it('should track all calls with trackCall/completeCall', () => {
+      const record = safety.trackCall('bl.listServers', []);
+      expect(record.status).toBe('pending');
+      expect(record.method).toBe('bl.listServers');
+
+      safety.completeCall(record);
+      expect(record.status).toBe('ok');
+      expect(record.durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should track failed calls with failCall', () => {
+      const record = safety.trackCall('bl.getServer', [999]);
+      safety.failCall(record, 'not found');
+
+      expect(record.status).toBe('error');
+      expect(record.error).toBe('not found');
+      expect(record.durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should record all calls in getCallLog', () => {
+      const r1 = safety.trackCall('bl.listServers', []);
+      safety.completeCall(r1);
+      const r2 = safety.trackCall('ssh.run', ['web-1', 'uptime']);
+      safety.completeCall(r2);
+      const r3 = safety.trackCall('bl.deleteServer', [123]);
+      safety.failCall(r3, 'forbidden');
+
+      const log = safety.getCallLog();
+      expect(log).toHaveLength(3);
+      expect(log[0].method).toBe('bl.listServers');
+      expect(log[0].status).toBe('ok');
+      expect(log[1].method).toBe('ssh.run');
+      expect(log[2].method).toBe('bl.deleteServer');
+      expect(log[2].status).toBe('error');
+    });
+
+    it('should track read-only calls too (not just mutating)', () => {
+      const r = safety.trackCall('bl.listRegions', []);
+      safety.completeCall(r);
+
+      const log = safety.getCallLog();
+      expect(log).toHaveLength(1);
+      expect(log[0].method).toBe('bl.listRegions');
+
+      // Read-only calls should NOT appear in audit log
+      expect(safety.getAuditLog()).toHaveLength(0);
+    });
+  });
+
+  describe('getCallSummary', () => {
+    it('should return empty string when no calls', () => {
+      expect(safety.getCallSummary()).toBe('');
+    });
+
+    it('should format a summary with call counts and timings', () => {
+      const r1 = safety.trackCall('bl.listServers', []);
+      safety.completeCall(r1);
+      const r2 = safety.trackCall('bl.getServer', [1]);
+      safety.completeCall(r2);
+
+      const summary = safety.getCallSummary();
+      expect(summary).toContain('2 calls');
+      expect(summary).toContain('bl.listServers');
+      expect(summary).toContain('bl.getServer');
+    });
+
+    it('should flag destructive calls', () => {
+      const r = safety.trackCall('bl.deleteServer', [123]);
+      safety.completeCall(r);
+
+      const summary = safety.getCallSummary();
+      expect(summary).toContain('[DESTRUCTIVE]');
+    });
+
+    it('should show errors in summary', () => {
+      const r = safety.trackCall('bl.getServer', [999]);
+      safety.failCall(r, 'not found');
+
+      const summary = safety.getCallSummary();
+      expect(summary).toContain('1 errors');
+      expect(summary).toContain('ERR: not found');
+    });
+  });
+
   describe('clearLog', () => {
-    it('should clear all audit entries', () => {
+    it('should clear all entries including call log', () => {
       const client = {
         deleteServer: vi.fn(),
         createServer: vi.fn(),
@@ -243,11 +328,14 @@ describe('SafetyInterceptor', () => {
       wrapped.createServer({});
 
       expect(safety.getAuditLog()).toHaveLength(2);
+      expect(safety.getCallLog()).toHaveLength(2);
 
       safety.clearLog();
 
       expect(safety.getAuditLog()).toHaveLength(0);
       expect(safety.getDestructiveOps()).toHaveLength(0);
+      expect(safety.getCallLog()).toHaveLength(0);
+      expect(safety.getCallSummary()).toBe('');
     });
   });
 });

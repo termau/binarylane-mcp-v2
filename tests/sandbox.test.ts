@@ -355,11 +355,60 @@ describe('Sandbox', () => {
     });
   });
 
+  describe('call summary', () => {
+    it('should include call summary when API methods are called', async () => {
+      const result = await sandbox.execute('return await bl.listServers()');
+      expect(result.callSummary).toContain('bl.listServers');
+      expect(result.callSummary).toContain('1 calls');
+    });
+
+    it('should include multiple calls in summary', async () => {
+      const result = await sandbox.execute(`
+        await bl.listServers();
+        await bl.getBalance();
+        return 'done';
+      `);
+      expect(result.callSummary).toContain('2 calls');
+      expect(result.callSummary).toContain('bl.listServers');
+      expect(result.callSummary).toContain('bl.getBalance');
+    });
+
+    it('should include SSH calls in summary', async () => {
+      const result = await sandbox.execute('return await ssh.run("web-1", "uptime")');
+      expect(result.callSummary).toContain('ssh.run');
+    });
+
+    it('should flag destructive calls in summary', async () => {
+      const result = await sandbox.execute('await bl.deleteServer(1); return "done"');
+      expect(result.callSummary).toContain('[DESTRUCTIVE]');
+    });
+
+    it('should return empty summary when no API calls made', async () => {
+      const result = await sandbox.execute('return 1 + 2');
+      expect(result.callSummary).toBe('');
+    });
+
+    it('should include summary even on error', async () => {
+      (blClient.getServer as any).mockRejectedValueOnce(new Error('not found'));
+      const result = await sandbox.execute('return await bl.getServer(999)');
+      expect(result.error).toBeTruthy();
+      expect(result.callSummary).toContain('bl.getServer');
+    });
+  });
+
   describe('audit log isolation', () => {
     it('should clear audit log between executions', async () => {
       await sandbox.execute('await bl.deleteServer(1)');
       const result2 = await sandbox.execute('return await bl.listServers()');
       expect(result2.destructiveOps).toHaveLength(0);
+    });
+
+    it('should clear call summary between executions', async () => {
+      const r1 = await sandbox.execute('await bl.listServers(); await bl.getBalance(); return "done"');
+      expect(r1.callSummary).toContain('2 calls');
+
+      const r2 = await sandbox.execute('return await bl.listServers()');
+      expect(r2.callSummary).toContain('1 calls');
     });
   });
 });

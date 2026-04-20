@@ -39,6 +39,9 @@ export function createHandlers(sandbox: Sandbox) {
 
       if (result.error) {
         output += `Error: ${result.error}`;
+        if (result.callSummary) {
+          output += `\n\n${result.callSummary}`;
+        }
         return {
           content: [{ type: 'text' as const, text: output }],
           isError: true,
@@ -55,7 +58,12 @@ export function createHandlers(sandbox: Sandbox) {
         output = 'Code executed successfully (no return value).';
       }
 
-      output += `\n\n[${result.durationMs}ms]`;
+      // Always include call summary for observability
+      if (result.callSummary) {
+        output += `\n\n${result.callSummary}`;
+      }
+
+      output += `\n[${result.durationMs}ms total]`;
 
       return {
         content: [{ type: 'text' as const, text: output }],

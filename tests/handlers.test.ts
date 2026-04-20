@@ -62,7 +62,7 @@ describe('Handlers', () => {
       const result = await handlers.execute({ code: 'return 42' });
       const text = result.content[0].text;
       expect(text).toContain('42');
-      expect(text).toContain('ms]');
+      expect(text).toContain('ms total]');
     });
 
     it('should return error with isError flag', async () => {
@@ -89,6 +89,20 @@ describe('Handlers', () => {
       const result = await handlers.execute({ code: 'const x = 1' });
       const text = result.content[0].text;
       expect(text).toContain('no return value');
+    });
+
+    it('should include call summary when API calls are made', async () => {
+      const result = await handlers.execute({ code: 'return await bl.listServers()' });
+      const text = result.content[0].text;
+      expect(text).toContain('API calls');
+      expect(text).toContain('bl.listServers');
+    });
+
+    it('should include call summary in error responses too', async () => {
+      const result = await handlers.execute({ code: 'await bl.deleteServer(1); throw new Error("oops")' });
+      const text = result.content[0].text;
+      expect(text).toContain('API calls');
+      expect(text).toContain('bl.deleteServer');
     });
   });
 

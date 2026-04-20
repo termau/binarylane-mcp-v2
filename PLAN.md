@@ -174,9 +174,10 @@ Each tool has a concise description optimized for token efficiency. The descript
 - Wraps user code in `(async () => { ... })()` for top-level await
 - Dual timeout: sync via `vm.runInContext` timeout + async via `Promise.race`
 - Captures console output to a buffer
-- Returns `{ result, logs, destructiveOps, error?, durationMs }`
+- Returns `{ result, logs, destructiveOps, callSummary, error?, durationMs }`
 - Includes sandbox line numbers in error stack traces for debugging
 - Cross-realm bridging via `bridgeAllMethods()` (see below)
+- Persistent execution log at `~/.config/binarylane/mcp-v2.log` — one JSON line per execution with timestamp, code, call details, timings, and errors
 
 **Cross-realm Promise and Object handling (critical implementation detail):**
 
@@ -194,17 +195,19 @@ Host realm (bl.listServers) → host Promise → host JSON.stringify → sandbox
 **globals.ts:**
 - Builds the global object exposed inside the sandbox
 - `bl` — created via `createBlInterface()` which iterates the BinaryLaneClient's methods (prototype + own properties for mock compatibility), binds each to the real client instance, and wraps with safety tracking. No Proxy used — explicit bound functions avoid cross-realm `this` issues.
-- `ssh` — explicit bound wrapper functions for each SSH method (run, readFile, writeFile, listDir, upload, download, connections, testConnection) with safety tracking on mutating operations
+- `ssh` — explicit bound wrapper functions for each SSH method (run, readFile, writeFile, listDir, upload, download, connections, testConnection) with call tracking on all operations via `trackedSsh()` helper
 - `console` — custom console (log, error, warn, info) that captures to buffer
 - Full set of JS builtins including atob/btoa/structuredClone
 
 **safety.ts:**
-- SafetyInterceptor class with `trackCall()` method called explicitly by the bound wrappers in globals.ts
+- SafetyInterceptor class with `trackCall()`, `completeCall()`, `failCall()` for full call lifecycle tracking
+- Every bl.* and ssh.* call is recorded with method name, start time, duration, and status (ok/error)
+- `getCallSummary()` returns a formatted summary included in every execute response for observability
+- `getCallLog()` returns structured records used by the persistent log
 - `wrapClient()` Proxy method kept for backwards compatibility with unit tests
 - Destructive patterns (delete*, remove*) get audit logged to stderr as JSON
 - Mutating patterns (create*, update*, perform*, proceed*, upload*) are tracked
 - Sensitive args (token, password, secret, key) are sanitized in audit logs
-- Returns list of destructive operations performed for response metadata
 
 ### 4. BinaryLane API Client (`src/api/`)
 
@@ -217,7 +220,7 @@ Ported from v1, Zod validation removed:
 - 56 API methods covering: account/billing, servers (CRUD + 23 action types), images, SSH keys, domains/DNS records, VPCs, load balancers, regions/sizes, actions, software
 
 **types.ts:**
-All TypeScript interfaces/types for API requests and responses. 500+ lines of type definitions including the ServerAction discriminated union (20 action subtypes).
+All TypeScript interfaces/types for API requests and responses. 550+ lines of type definitions including the ServerAction discriminated union (20 action subtypes). Types validated against live BinaryLane API responses (April 2026) — includes fields not in the original v1 types (e.g. `advanced_features`, `backup_settings`, `tax_code`, `excess_transfer_cost_per_gigabyte`). Metrics types (`SampleSet`, `SampleData`) completely rewritten to match actual API field names (`cpu_usage_percent`, `network_incoming_kbps`, etc.).
 
 ### 5. SSH Client (`src/ssh/`)
 
@@ -392,25 +395,33 @@ All destructive operations logged to stderr:
 13. ~~Test with real API token against live BinaryLane account~~ — DONE
 14. ~~Debug cross-realm Promise/Object issues in vm sandbox~~ — DONE (see sandbox.ts notes)
 15. ~~Fix API token loading (config file uses `api-token` with hyphen)~~ — DONE
-16. ~~Update Claude Code MCP config to point to v2~~ — DONE (`claude mcp add binarylane-v2`)
+16. ~~Update Claude Code MCP config to point to v2~~ — DONE (`claude mcp add binarylane-v2 -e BINARYLANE_API_TOKEN=...`)
 17. ~~Add unit tests (93 tests across 4 files)~~ — DONE
 18. ~~Add custom skills (/bl-test, /bl-build, /bl-search, /bl-status)~~ — DONE
-19. Compare token usage: v1 (86 tools) vs v2 (3 tools) — TODO
-20. Validate complex multi-step operations work in single execute via MCP — TODO
-21. Consider adding `refresh` tool for mid-session SSH connection re-discovery
-22. Add more detailed docs entries for remaining methods (auto-generated fallback works but isn't as rich)
-23. Remove old `ssh` MCP server once v2 SSH is validated
+19. ~~Fix API types to match live BinaryLane API responses~~ — DONE (SampleSet/SampleData, Balance, Account, Server, Image, Size, Networks)
+20. ~~Fix error handling: 401 with empty body now throws instead of returning {}~~ — DONE
+21. ~~Add call observability: call summary in responses + persistent log file~~ — DONE
+22. ~~Validate complex multi-step operations via MCP (server health, SSH, blog publish)~~ — DONE
+23. Compare token usage: v1 (86 tools) vs v2 (3 tools) — TODO
+24. Consider adding `refresh` tool for mid-session SSH connection re-discovery
+25. Add more detailed docs entries for remaining methods (auto-generated fallback works but isn't as rich)
+26. Remove old `ssh` MCP server once v2 SSH is validated
 
 ### Key Bugs Found & Fixed During Testing
 1. **Token regex** — config file uses `api-token` (hyphen) but regex only matched `api_token` (underscore). Fixed with `api[-_]token`.
 2. **Cross-realm Promises** — `vm.createContext` creates a new JS realm. The sandbox's `await` couldn't unwrap host-realm Promises from bl/ssh methods. Fixed by wrapping methods to return `new SandboxPromise(...)`.
 3. **Cross-realm Objects** — Resolved values appeared as empty `{}` because host-realm objects' properties are invisible to the sandbox's `Object.keys()`. Fixed by using `SandboxJSON.parse(JSON.stringify(v))` to create objects in the sandbox realm.
 4. **Proxy `this` binding** — Double-Proxy chains (safety + bridgePromises) caused `this` context loss. Fixed by replacing Proxy-based wrapping with explicit bound functions in globals.ts.
+5. **API types wrong** — v1 types were based on documentation, not live API. SampleData had `cpu` instead of `cpu_usage_percent`, Balance had `account_balance` instead of `unbilled_total`, etc. Fixed by querying live API and rewriting types.
+6. **401 swallowed silently** — API client's `if (!text) return {} as T` ran before `if (!response.ok)`, so 401 responses with empty body returned `{}` instead of throwing. Fixed by checking `response.ok` first.
+7. **MCP env var** — Token loaded from config file in direct tests but MCP process didn't inherit HOME properly. Fixed by passing token as env var in MCP registration: `claude mcp add -e BINARYLANE_API_TOKEN=...`.
 
 ### Project Stats
-- **17 source files** (13 src + 4 test), ~5,500 lines TypeScript
+- **17 source files** (13 src + 4 test), ~6,000 lines TypeScript
 - **93 unit tests** across 4 test files (catalog, safety, sandbox, handlers)
 - **Compiles clean** with strict mode
-- **Git initialized** with initial commit
+- **2 git commits** (initial build + fixes)
 - **Dependencies:** MCP SDK, ssh2, vitest (dev)
 - **Custom skills:** /bl-test, /bl-build, /bl-search, /bl-status
+- **Persistent log:** ~/.config/binarylane/mcp-v2.log
+- **Blog post:** Published as post #29 on wp.adamhomenet.com

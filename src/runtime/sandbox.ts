@@ -13,15 +13,22 @@
  */
 
 import vm from 'node:vm';
+import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { BinaryLaneClient } from '../api/client.js';
 import { SSHClientManager } from '../ssh/client.js';
 import { SafetyInterceptor } from './safety.js';
 import { buildSandboxGlobals } from './globals.js';
 
+const LOG_DIR = join(homedir(), '.config', 'binarylane');
+const LOG_PATH = join(LOG_DIR, 'mcp-v2.log');
+
 export interface ExecutionResult {
   result: unknown;
   logs: string[];
   destructiveOps: string[];
+  callSummary: string;
   error?: string;
   durationMs: number;
 }
@@ -92,6 +99,30 @@ export class Sandbox {
     this.defaultTimeout = options?.timeout ?? 60000;
   }
 
+  private writeLog(code: string, result: ExecutionResult): void {
+    try {
+      if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+
+      const entry = {
+        timestamp: new Date().toISOString(),
+        durationMs: result.durationMs,
+        calls: this.safety.getCallLog().map(c => ({
+          method: c.method,
+          durationMs: c.durationMs,
+          status: c.status,
+          ...(c.destructive && { destructive: true }),
+          ...(c.error && { error: c.error }),
+        })),
+        ...(result.error && { error: result.error }),
+        code: code.trim(),
+      };
+
+      appendFileSync(LOG_PATH, JSON.stringify(entry) + '\n');
+    } catch {
+      // Don't let logging failures break execution
+    }
+  }
+
   async execute(code: string, timeout?: number): Promise<ExecutionResult> {
     const startTime = Date.now();
     const effectiveTimeout = timeout ?? this.defaultTimeout;
@@ -150,12 +181,15 @@ export class Sandbox {
         }),
       ]);
 
-      return {
+      const execResult: ExecutionResult = {
         result,
         logs,
         destructiveOps: this.safety.getDestructiveOps(),
+        callSummary: this.safety.getCallSummary(),
         durationMs: Date.now() - startTime,
       };
+      this.writeLog(code, execResult);
+      return execResult;
     } catch (error) {
       let errorMessage: string;
 
@@ -178,13 +212,16 @@ export class Sandbox {
         errorMessage = String(error);
       }
 
-      return {
+      const execResult: ExecutionResult = {
         result: undefined,
         logs,
         destructiveOps: this.safety.getDestructiveOps(),
+        callSummary: this.safety.getCallSummary(),
         error: errorMessage,
         durationMs: Date.now() - startTime,
       };
+      this.writeLog(code, execResult);
+      return execResult;
     }
   }
 }
