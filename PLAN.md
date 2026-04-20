@@ -70,18 +70,22 @@ Result:
 **Available globals in the sandbox:**
 
 ```
-bl.*          — BinaryLane API client (all methods from api-client.ts)
-ssh.*         — SSH client (run commands, read/write files, manage connections)
-console.log() — Captured and returned alongside the result
-JSON          — JSON.parse/stringify
-Promise       — For parallel operations
-setTimeout    — Capped at execution timeout
+bl.*               — BinaryLane API client (56 methods)
+ssh.*              — SSH client (run, readFile, writeFile, listDir, upload, download, connections, testConnection)
+console.log/error/warn/info — Captured and returned alongside the result
+JSON, Promise, Array, Object, Map, Set, Date, Math, RegExp
+Error, TypeError, RangeError, SyntaxError, Number, String, Boolean, Symbol
+parseInt, parseFloat, isNaN, isFinite
+encodeURIComponent, decodeURIComponent, encodeURI, decodeURI
+atob, btoa, structuredClone
+setTimeout (capped at execution timeout), clearTimeout
 ```
 
 **Safety controls:**
 - Destructive `bl` operations (delete_*, remove_*) log to audit trail before execution
+- All mutating operations (create, update, perform, proceed, upload) are tracked
 - Code that calls destructive methods gets flagged in the response metadata
-- Execution timeout prevents runaway code
+- Execution timeout prevents runaway code (sync via vm timeout, async via Promise.race)
 - No filesystem access, no outbound network except through bl/ssh
 
 ### 3. `describe`
@@ -111,31 +115,33 @@ setTimeout    — Capped at execution timeout
 ```
 bl-mcpv2/
 ├── PLAN.md                    # This file
+├── CLAUDE.md                  # Project context for Claude Code
 ├── package.json
 ├── tsconfig.json
+├── .gitignore
 ├── src/
 │   ├── index.ts               # MCP server entry point — registers 3 tools
 │   ├── tools.ts               # Tool definitions (search, execute, describe)
 │   ├── handlers.ts            # Tool handlers — dispatch to search/execute/describe
 │   │
 │   ├── runtime/
-│   │   ├── sandbox.ts         # vm.Context setup, code execution, timeout, output capture
-│   │   ├── globals.ts         # Defines what's available inside the sandbox (bl, ssh, console)
-│   │   └── safety.ts          # Destructive operation interception, audit logging
+│   │   ├── sandbox.ts         # vm.Context setup, async timeout, output capture
+│   │   ├── globals.ts         # Sandbox global object builder (bl, ssh, console, builtins)
+│   │   └── safety.ts          # Destructive operation interception, audit logging via Proxy
 │   │
 │   ├── api/
-│   │   ├── client.ts          # BinaryLane API HTTP client (carried from v1, cleaned up)
-│   │   └── types.ts           # API response types (carried from v1)
+│   │   ├── client.ts          # BinaryLane API HTTP client (56 methods, retry, rate limiting)
+│   │   └── types.ts           # All API response/request types
 │   │
 │   ├── ssh/
-│   │   ├── client.ts          # SSH/SFTP client (carried from v1 ssh-mcp)
-│   │   ├── connections.ts     # Connection config loading, BinaryLane auto-discovery
-│   │   └── types.ts           # SSH connection types
+│   │   ├── client.ts          # SSH/SFTP client with ProxyJump, target resolution by name/IP
+│   │   ├── connections.ts     # 3-layer connection config + BinaryLane auto-discovery
+│   │   └── types.ts           # SSH connection/result types
 │   │
 │   └── catalog/
-│       ├── index.ts           # Search engine — indexes all methods, handles queries
-│       ├── methods.ts         # Complete method catalog with signatures + descriptions
-│       └── docs.ts            # Detailed per-method documentation for describe tool
+│       ├── index.ts           # Search engine — keyword matching, relevance ranking
+│       ├── methods.ts         # 79-entry method catalog (73 bl + 6 ssh) with signatures
+│       └── docs.ts            # Detailed per-method docs with gotchas and examples
 ```
 
 ---
@@ -145,11 +151,12 @@ bl-mcpv2/
 ### 1. MCP Server (`src/index.ts`)
 
 Minimal entry point:
-- Validates `BINARYLANE_API_TOKEN` from env or config file
+- Validates `BINARYLANE_API_TOKEN` from env or config file (~/.config/binarylane/config)
 - Initializes BinaryLane API client
 - Initializes SSH client with connection auto-discovery
 - Registers 3 tools with the MCP SDK
 - Routes tool calls to handlers
+- Actionable error messages by HTTP status code (401, 403, 404, 429, 5xx)
 
 ### 2. Tool Definitions (`src/tools.ts`)
 
@@ -163,100 +170,105 @@ Each tool has a concise description optimized for token efficiency. The descript
 ### 3. Sandbox Runtime (`src/runtime/`)
 
 **sandbox.ts:**
-- Creates a `vm.Context` with controlled globals
-- Wraps user code in `(async () => { ... })()` for async support
+- Creates a `vm.Context` with controlled globals via `globals.ts`
+- Wraps user code in `(async () => { ... })()` for top-level await
+- Dual timeout: sync via `vm.runInContext` timeout + async via `Promise.race`
 - Captures console output to a buffer
-- Enforces execution timeout via `vm.runInContext` timeout option
-- Returns `{ result: any, logs: string[], destructiveOps: string[] }`
+- Returns `{ result, logs, destructiveOps, error?, durationMs }`
+- Includes sandbox line numbers in error stack traces for debugging
+- Cross-realm bridging via `bridgeAllMethods()` (see below)
+
+**Cross-realm Promise and Object handling (critical implementation detail):**
+
+`vm.createContext` creates a completely separate JavaScript realm. This caused two problems that took significant debugging to solve:
+
+1. **Cross-realm Promises:** `bl` and `ssh` methods return host-realm Promises. The sandbox's `await` uses its own realm's Promise constructor and can't properly unwrap host-realm Promises — they appear as plain objects. **Fix:** After creating the context, we extract the sandbox's `Promise` constructor via `vm.runInContext('Promise', context)` and wrap every bl/ssh method to return `new SandboxPromise((resolve, reject) => hostPromise.then(resolve, reject))`.
+
+2. **Cross-realm Objects:** Even after fixing Promises, resolved values were still empty `{}` inside the sandbox. Objects created in the host realm (by `JSON.parse` or API responses) have properties that are invisible to the sandbox's `Object.keys()` — the sandbox uses its own realm's `Object` intrinsics. **Fix:** Extract the sandbox's `JSON` via `vm.runInContext('JSON', context)`, then serialize with the host's `JSON.stringify` and deserialize with the sandbox's `JSON.parse` — `TargetJSON.parse(JSON.stringify(v))`. This creates plain objects that live in the sandbox realm.
+
+Both fixes live in `bridgeAllMethods()` which wraps every function property on bl/ssh objects. The pattern is:
+```
+Host realm (bl.listServers) → host Promise → host JSON.stringify → sandbox JSON.parse → sandbox Promise.resolve → sandbox await
+```
 
 **globals.ts:**
 - Builds the global object exposed inside the sandbox
-- `bl` — proxy around BinaryLaneClient that intercepts destructive calls
-- `ssh` — proxy around SSHClient with connection resolution
-- `console` — custom console that captures to buffer
-- Standard built-ins: `JSON`, `Promise`, `Array`, `Object`, `Map`, `Set`, `Date`, `Math`, `RegExp`, `Error`, `setTimeout`, `parseInt`, `parseFloat`, `isNaN`, `encodeURIComponent`, `decodeURIComponent`
+- `bl` — created via `createBlInterface()` which iterates the BinaryLaneClient's methods (prototype + own properties for mock compatibility), binds each to the real client instance, and wraps with safety tracking. No Proxy used — explicit bound functions avoid cross-realm `this` issues.
+- `ssh` — explicit bound wrapper functions for each SSH method (run, readFile, writeFile, listDir, upload, download, connections, testConnection) with safety tracking on mutating operations
+- `console` — custom console (log, error, warn, info) that captures to buffer
+- Full set of JS builtins including atob/btoa/structuredClone
 
 **safety.ts:**
-- Maintains a list of destructive method patterns (delete*, remove*, create*, update*)
-- Create/update are flagged but not blocked — delete/remove get audit logged
-- Intercepts calls via Proxy, logs to stderr with timestamp
-- Returns metadata about what destructive operations were performed
-- Future: could add confirmation flow for destructive ops
+- SafetyInterceptor class with `trackCall()` method called explicitly by the bound wrappers in globals.ts
+- `wrapClient()` Proxy method kept for backwards compatibility with unit tests
+- Destructive patterns (delete*, remove*) get audit logged to stderr as JSON
+- Mutating patterns (create*, update*, perform*, proceed*, upload*) are tracked
+- Sensitive args (token, password, secret, key) are sanitized in audit logs
+- Returns list of destructive operations performed for response metadata
 
 ### 4. BinaryLane API Client (`src/api/`)
 
 **client.ts:**
-Carried from v1 with improvements:
-- Same HTTP layer with retry logic, rate limiting, exponential backoff
-- Same 56 API methods
-- Methods are organized into clear namespaces for the sandbox:
-  - `bl.servers.*` or flat `bl.listServers()` — TBD which feels better in generated code
-  - Flat is simpler and matches v1. Keep flat.
-- Remove Zod validation from the client layer — the model writes code with correct types, and the API returns errors for bad input anyway. Validation was needed when Claude was filling out tool schemas; with code mode, the model controls the types directly.
+Ported from v1, Zod validation removed:
+- HTTP layer with retry logic (exponential backoff + jitter)
+- Rate limiting (max 5 concurrent, FIFO queue)
+- Retryable status codes: 429, 502, 503, 504
+- Retry-After header support
+- 56 API methods covering: account/billing, servers (CRUD + 23 action types), images, SSH keys, domains/DNS records, VPCs, load balancers, regions/sizes, actions, software
 
 **types.ts:**
-All TypeScript interfaces/types for API responses. Carried from v1.
+All TypeScript interfaces/types for API requests and responses. 500+ lines of type definitions including the ServerAction discriminated union (20 action subtypes).
 
 ### 5. SSH Client (`src/ssh/`)
 
 **client.ts:**
-Merged from ssh-mcp with the following interface exposed in sandbox:
-
-```typescript
-ssh.run(target: string, command: string, options?: { timeout?: number }) → Promise<{ stdout: string, stderr: string, exitCode: number }>
-ssh.readFile(target: string, remotePath: string) → Promise<string>
-ssh.writeFile(target: string, remotePath: string, content: string) → Promise<void>
-ssh.listDir(target: string, remotePath: string) → Promise<FileEntry[]>
-ssh.upload(target: string, localPath: string, remotePath: string) → Promise<void>
-ssh.download(target: string, remotePath: string, localPath: string) → Promise<void>
-ssh.connections() → ConnectionInfo[]
-```
-
-`target` is a connection name (e.g. "wp-web-1-syd") or an IP address. The client resolves it against the connection config, handling ProxyJump transparently.
+Merged from ssh-mcp into unified MCP:
+- `resolveTarget()` — accepts connection name OR IP address. Looks up config, falls back to ephemeral connection for bare IPs
+- ProxyJump support — transparently tunnels through jump hosts
+- SSH key auth with fallback to password, then default key paths
+- Methods: run, readFile, writeFile, listDir, upload, download, testConnection, listConnections
 
 **connections.ts:**
-Three-layer connection resolution (same as v1 ssh-mcp):
-1. Config file: `~/.config/binarylane/ssh-connections.json`
+Three-layer connection resolution (highest priority wins):
+1. Config file: `~/.config/ssh-mcp/connections.json`
 2. Environment variable: `SSH_CONNECTIONS`
-3. BinaryLane auto-discovery: Fetches active servers from the API, extracts public IPs
+3. BinaryLane auto-discovery: Fetches active servers from API, extracts public IPs
 
-Auto-discovery means the model can `ssh.run("my-server-name", "uptime")` using just the server name from BinaryLane — no manual IP mapping needed.
+**types.ts:**
+SSH connection, command result, file entry, and config types.
 
 ### 6. Method Catalog (`src/catalog/`)
 
 **methods.ts:**
-A structured array of all available methods:
-
-```typescript
-interface CatalogEntry {
-  name: string;           // e.g. "bl.listServers"
-  description: string;    // One-line description
-  parameters: ParamInfo[];
-  returnType: string;     // Brief return type description
-  tags: string[];         // ["servers", "read-only", "list"]
-  destructive: boolean;
-  idempotent: boolean;
-}
-```
-
-This is the search index. ~73 entries for bl.*, ~6 entries for ssh.*. Each entry is compact — just enough for search results.
+79 catalog entries (73 bl.* + 6 ssh.*), each with:
+- name, description, parameters (name/type/required/description), returnType
+- tags for search (e.g. "servers", "firewall", "read-only", "destructive")
+- destructive and idempotent flags
 
 **docs.ts:**
-Detailed documentation keyed by method name. Includes:
-- Full parameter schemas with types, constraints, defaults
-- Complete return type with field descriptions
-- Code examples
-- Platform gotchas (carried from v1 tool descriptions)
-- Related methods
+Detailed documentation for key methods with platform gotchas:
+- `bl.performServerAction` — all 23 action types, firewall rule gotchas
+- `bl.createServer` — size/image/region discovery, naming rules
+- `bl.createLoadBalancer` — anycast gotcha (no region param), loopback config
+- `bl.listServers` — pagination, hostname filter, IP extraction pattern
+- `bl.deleteServer` — irreversibility warning
+- `bl.createDomainRecord` — all record types, TTL ranges, CNAME trailing dot
+- `bl.createVpc` — IP range auto-assignment, overlap rules
+- `bl.getServerMetrics` — intervals, retention, SampleData fields
+- `ssh.run` — parallel execution pattern, ProxyJump transparency, timeouts
+- `ssh.connections` — source priority explanation
+- `ssh.readFile` / `ssh.writeFile` — gotchas for large/binary files, permissions
 
-This is what `describe` returns. Verbose by design — only loaded when the model needs it.
+Methods without detailed docs fall back to auto-generated docs from catalog entries.
 
 **index.ts:**
-Search engine:
-- Indexes method names, descriptions, parameters, and tags
-- Supports keyword matching and basic fuzzy matching
-- Ranks results by relevance (name match > description match > tag match)
-- Returns top N results (default 10)
+Search engine with relevance scoring:
+- Exact name match: 100 points
+- Name contains term: 20 points
+- Tag exact match: 15 points
+- Tag partial match: 8 points
+- Description match: 10 points
+- Parameter match: 5 points
 
 ---
 
@@ -268,13 +280,18 @@ Search engine:
 
 ### Config Files
 - `~/.config/binarylane/config` — API token (fallback if env var not set)
-- `~/.config/binarylane/ssh-connections.json` — Persistent SSH connections (replaces `~/.config/ssh-mcp/connections.json`)
+- `~/.config/ssh-mcp/connections.json` — Persistent SSH connections
 
 ### MCP Registration
+```bash
+claude mcp add binarylane-v2 node /Users/adam/bl-mcpv2/dist/index.js
+```
+
+Or in settings:
 ```json
 {
   "mcpServers": {
-    "binarylane": {
+    "binarylane-v2": {
       "command": "node",
       "args": ["/Users/adam/bl-mcpv2/dist/index.js"],
       "env": {
@@ -293,85 +310,107 @@ One MCP server. Three tools. Replaces both `binarylane-mcp` and `ssh-mcp`.
 
 ### Execution Safety
 - **No filesystem access** — sandbox has no `fs`, `require`, or `import`
-- **No arbitrary network** — only `bl` and `ssh` provide network access
-- **Timeout enforcement** — default 60s, prevents infinite loops
-- **Memory limits** — vm context resource limits where supported
+- **No arbitrary network** — only `bl` and `ssh` provide network access — `fetch` is not available inside the sandbox
+- **Dual timeout** — sync (vm timeout for infinite loops) + async (Promise.race for hanging awaits)
+- **Restricted globals** — only whitelisted JS builtins available
+- **Realm isolation** — sandbox runs in a separate JS realm (vm.createContext). Objects crossing the boundary are serialized/deserialized so no host-realm references leak into the sandbox
 
 ### Destructive Operation Safety
-- All delete/remove operations are audit logged to stderr
+- All delete/remove operations are audit logged to stderr as JSON
+- All mutating operations (create/update/perform) are tracked
 - Response metadata flags which destructive operations were called
+- Sensitive args (tokens, passwords) sanitized in audit logs
 - The model sees this feedback and can inform the user
 
 ### SSH Safety
-- SSH connections resolve through config — model can't SSH to arbitrary hosts
+- SSH connections resolve through config — model can't SSH to arbitrary hosts (except bare IPs which create ephemeral root@IP connections)
 - Commands run with the privileges of the configured SSH user
 - Command timeout enforced (default 30s)
 
 ### Audit Trail
-All operations logged to stderr as JSON:
+All destructive operations logged to stderr:
 ```json
 {
-  "timestamp": "2026-04-20T10:00:00Z",
   "audit": true,
-  "type": "execute",
-  "destructiveOps": ["bl.deleteServer(12345)"],
-  "code": "...",
-  "result": "..."
+  "timestamp": "2026-04-20T10:00:00Z",
+  "method": "bl.deleteServer",
+  "args": [12345],
+  "destructive": true
 }
 ```
 
 ---
 
-## Migration Path
+## Migration from v1
 
-### What carries over from v1:
+### What carries over:
 - `api-client.ts` — HTTP layer, retry logic, rate limiting, all 56 API methods
-- API types — all TypeScript interfaces
-- SSH client core — ssh2 library usage, SFTP, ProxyJump
-- Connection config format and auto-discovery logic
+- API types — all TypeScript interfaces (~500 lines)
+- SSH client core — ssh2 library, SFTP, ProxyJump, connection resolution
+- Connection config format and BinaryLane auto-discovery logic
 - Audit logging pattern
-- Error message formatting by HTTP status code
 
 ### What changes:
-- 73 tool definitions → search catalog entries
-- 13 SSH tool definitions → search catalog entries
+- 73 BinaryLane tool definitions → 79-entry search catalog
+- 13 SSH tool definitions → merged into same catalog
 - Zod input schemas → removed (model writes code with correct types)
-- Handler dispatch → replaced by sandbox execution
+- Handler dispatch (one handler per tool) → sandbox execution
 - Two MCP servers → one unified server
 
 ### What's new:
-- vm sandbox runtime
+- vm sandbox runtime with dual timeout
+- Globals builder with safety proxy
 - Method catalog + search engine
-- Detailed docs system (describe tool)
-- Safety proxy layer for destructive operations
-- Merged SSH capability
+- Detailed docs system with platform gotchas
+- Safety interceptor for destructive operations
 
 ---
 
-## Build Order
+## Build Progress
 
-### Phase 1: Foundation
-1. Initialize project (package.json, tsconfig.json)
-2. Port API client (`src/api/client.ts`, `src/api/types.ts`)
-3. Port SSH client (`src/ssh/client.ts`, `src/ssh/connections.ts`, `src/ssh/types.ts`)
+### Phase 1: Foundation — DONE
+1. ~~Initialize project (package.json, tsconfig.json)~~
+2. ~~Port API client (`src/api/client.ts`, `src/api/types.ts`)~~
+3. ~~Port SSH client (`src/ssh/client.ts`, `src/ssh/connections.ts`, `src/ssh/types.ts`)~~
 
-### Phase 2: Catalog
-4. Build method catalog (`src/catalog/methods.ts`)
-5. Build detailed docs (`src/catalog/docs.ts`)
-6. Build search engine (`src/catalog/index.ts`)
+### Phase 2: Catalog — DONE
+4. ~~Build method catalog (`src/catalog/methods.ts`) — 79 entries~~
+5. ~~Build detailed docs (`src/catalog/docs.ts`) — 11 key methods documented~~
+6. ~~Build search engine (`src/catalog/index.ts`) — keyword search with relevance scoring~~
 
-### Phase 3: Runtime
-7. Build sandbox (`src/runtime/sandbox.ts`)
-8. Build globals/capabilities (`src/runtime/globals.ts`)
-9. Build safety layer (`src/runtime/safety.ts`)
+### Phase 3: Runtime — DONE
+7. ~~Build sandbox (`src/runtime/sandbox.ts`) — vm.Context with dual async/sync timeout~~
+8. ~~Build globals (`src/runtime/globals.ts`) — separated from sandbox, full builtin set~~
+9. ~~Build safety layer (`src/runtime/safety.ts`) — Proxy-based interception + audit logging~~
 
-### Phase 4: MCP Server
-10. Define 3 tools (`src/tools.ts`)
-11. Build handlers (`src/handlers.ts`)
-12. Wire up entry point (`src/index.ts`)
+### Phase 4: MCP Server — DONE
+10. ~~Define 3 tools (`src/tools.ts`)~~
+11. ~~Build handlers (`src/handlers.ts`)~~
+12. ~~Wire up entry point (`src/index.ts`) — token validation, SSH init, MCP registration~~
 
-### Phase 5: Polish
-13. Test with real API token against live BinaryLane account
-14. Compare token usage: v1 (86 tools) vs v2 (3 tools)
-15. Validate complex multi-step operations work in single execute
-16. Update Claude Code MCP config to point to v2
+### Phase 5: Testing & Polish — IN PROGRESS
+13. ~~Test with real API token against live BinaryLane account~~ — DONE
+14. ~~Debug cross-realm Promise/Object issues in vm sandbox~~ — DONE (see sandbox.ts notes)
+15. ~~Fix API token loading (config file uses `api-token` with hyphen)~~ — DONE
+16. ~~Update Claude Code MCP config to point to v2~~ — DONE (`claude mcp add binarylane-v2`)
+17. ~~Add unit tests (93 tests across 4 files)~~ — DONE
+18. ~~Add custom skills (/bl-test, /bl-build, /bl-search, /bl-status)~~ — DONE
+19. Compare token usage: v1 (86 tools) vs v2 (3 tools) — TODO
+20. Validate complex multi-step operations work in single execute via MCP — TODO
+21. Consider adding `refresh` tool for mid-session SSH connection re-discovery
+22. Add more detailed docs entries for remaining methods (auto-generated fallback works but isn't as rich)
+23. Remove old `ssh` MCP server once v2 SSH is validated
+
+### Key Bugs Found & Fixed During Testing
+1. **Token regex** — config file uses `api-token` (hyphen) but regex only matched `api_token` (underscore). Fixed with `api[-_]token`.
+2. **Cross-realm Promises** — `vm.createContext` creates a new JS realm. The sandbox's `await` couldn't unwrap host-realm Promises from bl/ssh methods. Fixed by wrapping methods to return `new SandboxPromise(...)`.
+3. **Cross-realm Objects** — Resolved values appeared as empty `{}` because host-realm objects' properties are invisible to the sandbox's `Object.keys()`. Fixed by using `SandboxJSON.parse(JSON.stringify(v))` to create objects in the sandbox realm.
+4. **Proxy `this` binding** — Double-Proxy chains (safety + bridgePromises) caused `this` context loss. Fixed by replacing Proxy-based wrapping with explicit bound functions in globals.ts.
+
+### Project Stats
+- **17 source files** (13 src + 4 test), ~5,500 lines TypeScript
+- **93 unit tests** across 4 test files (catalog, safety, sandbox, handlers)
+- **Compiles clean** with strict mode
+- **Git initialized** with initial commit
+- **Dependencies:** MCP SDK, ssh2, vitest (dev)
+- **Custom skills:** /bl-test, /bl-build, /bl-search, /bl-status

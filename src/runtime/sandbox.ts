@@ -4,9 +4,12 @@
  * Runs model-generated JavaScript in an isolated context
  * with only bl and ssh exposed as capabilities.
  *
- * IMPORTANT: vm.runInContext's `timeout` option only works for synchronous
- * code. Async code (awaiting API/SSH calls) won't be killed by it.
- * We use Promise.race with AbortController to enforce async timeouts.
+ * CROSS-REALM PROMISE HANDLING:
+ * vm.createContext creates a new JS realm with its own Promise constructor.
+ * Methods on bl/ssh are bound to the real client instances (in globals.ts)
+ * and return host-realm Promises. After creating the context, we wrap
+ * every function property on bl/ssh to convert host-realm Promises into
+ * sandbox-realm Promises that the sandbox's `await` can handle.
  */
 
 import vm from 'node:vm';
@@ -25,6 +28,51 @@ export interface ExecutionResult {
 
 export interface SandboxOptions {
   timeout?: number; // ms, default 60000
+}
+
+/**
+ * Wrap all function properties on an object so that any returned
+ * host-realm Promise is converted to a target-realm Promise.
+ */
+function bridgeAllMethods(
+  obj: Record<string, any>,
+  TargetPromise: PromiseConstructor,
+  TargetJSON: typeof JSON,
+): Record<string, any> {
+  const bridged: Record<string, any> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (typeof value === 'function') {
+      bridged[key] = (...args: unknown[]) => {
+        const result = value(...args);
+        if (result && typeof result === 'object' && typeof result.then === 'function') {
+          return new TargetPromise((resolve: Function, reject: Function) => {
+            result.then(
+              (v: unknown) => {
+                try {
+                  resolve(TargetJSON.parse(JSON.stringify(v)));
+                } catch {
+                  resolve(v);
+                }
+              },
+              (e: unknown) => reject(e),
+            );
+          });
+        }
+        // Sync returns: also bridge to sandbox realm
+        if (result && typeof result === 'object') {
+          try {
+            return TargetJSON.parse(JSON.stringify(result));
+          } catch {
+            return result;
+          }
+        }
+        return result;
+      };
+    } else {
+      bridged[key] = value;
+    }
+  }
+  return bridged;
 }
 
 export class Sandbox {
@@ -51,7 +99,7 @@ export class Sandbox {
 
     const logs: string[] = [];
 
-    // Build sandbox globals
+    // Build sandbox globals with explicitly bound methods
     const globals = buildSandboxGlobals(
       this.blClient,
       this.sshClient,
@@ -60,27 +108,41 @@ export class Sandbox {
       effectiveTimeout,
     );
 
+    // Create sandbox context
     const context = vm.createContext(globals);
 
-    // Wrap code in an async IIFE so await works at top level.
-    // Use return for the last expression to be captured.
+    // Get the sandbox realm's Promise and JSON constructors
+    const SandboxPromise = vm.runInContext('Promise', context) as PromiseConstructor;
+    const SandboxJSON = vm.runInContext('JSON', context) as typeof JSON;
+
+    // Bridge bl and ssh methods to return sandbox-realm Promises
+    // with sandbox-realm objects (via SandboxJSON.parse)
+    context.bl = bridgeAllMethods(globals.bl as Record<string, any>, SandboxPromise, SandboxJSON);
+    context.ssh = bridgeAllMethods(globals.ssh as Record<string, any>, SandboxPromise, SandboxJSON);
+
     const wrappedCode = `(async () => {\n${code}\n})()`;
 
     try {
-      // Compile the script (catches syntax errors early)
       const script = new vm.Script(wrappedCode, {
         filename: 'sandbox.js',
       });
 
-      // Run with both sync timeout (catches infinite loops in sync code)
-      // and async timeout (catches hanging await calls)
-      const promise = script.runInContext(context, {
+      // Run the script — returns a sandbox-realm Promise
+      const sandboxPromise = script.runInContext(context, {
         timeout: effectiveTimeout,
       });
 
-      // Race the async result against a timeout
+      // Bridge sandbox-realm Promise back to host realm
+      const hostPromise = new Promise((resolve, reject) => {
+        sandboxPromise.then(
+          (v: unknown) => resolve(v),
+          (e: unknown) => reject(e),
+        );
+      });
+
+      // Race against async timeout
       const result = await Promise.race([
-        promise,
+        hostPromise,
         new Promise((_, reject) => {
           setTimeout(() => {
             reject(new Error(`Execution timed out after ${effectiveTimeout}ms`));
@@ -98,12 +160,10 @@ export class Sandbox {
       let errorMessage: string;
 
       if (error instanceof Error) {
-        // Clean up vm-specific error noise
         if (error.message.includes('Script execution timed out')) {
           errorMessage = `Execution timed out after ${effectiveTimeout}ms. Try breaking the operation into smaller steps or increasing the timeout.`;
         } else {
           errorMessage = error.message;
-          // Include stack trace for code errors (helps debugging)
           if (error.stack && error.stack.includes('sandbox.js')) {
             const sandboxLines = error.stack
               .split('\n')

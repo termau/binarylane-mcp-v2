@@ -41,7 +41,7 @@ function getApiToken(): string {
       try {
         const content = readFileSync(configPath, 'utf-8');
         // Look for token in various formats
-        const match = content.match(/(?:api_token|token)\s*=\s*([a-zA-Z0-9]+)/);
+        const match = content.match(/(?:api[-_]token|token)\s*=\s*([a-zA-Z0-9]+)/);
         if (match && match[1]) return match[1];
         // Plain token file
         const trimmed = content.trim();

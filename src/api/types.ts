@@ -23,14 +23,34 @@ export interface MetaResponse {
 export interface Account {
   email: string;
   email_verified: boolean;
-  server_limit: number;
+  two_factor_authentication_enabled: boolean;
   status: string;
+  tax_code?: {
+    name: string;
+    type: string;
+    fixed_percent: number;
+  };
+  configured_payment_methods?: string[];
+  additional_ipv4_limit?: number;
+  credit_limit?: number;
+  server_limit?: number;
 }
 
 export interface Balance {
-  account_balance: string;
-  month_to_date_usage: string;
-  month_to_date_balance: string;
+  unbilled_total: number;
+  available_credit: number;
+  charges: BalanceCharge[];
+  generated_at: string;
+  // Legacy fields (may not be present in newer API)
+  account_balance?: string;
+  month_to_date_usage?: string;
+  month_to_date_balance?: string;
+}
+
+export interface BalanceCharge {
+  description: string;
+  amount: number;
+  date?: string;
 }
 
 export interface Invoice {
@@ -62,15 +82,20 @@ export interface Server {
   size: Size;
   size_slug: string;
   networks: Networks;
-  vpc_id?: number;
-  next_backup_window?: BackupWindow;
+  vpc_id?: number | null;
+  next_backup_window?: BackupWindow | null;
   password_change_supported: boolean;
-  selected_size_options?: SizeOptions;
-  partner_id?: number;
+  selected_size_options?: SizeOptions | null;
+  partner_id?: number | null;
   failover_ips?: string[];
-  host?: Host;
+  host?: Host | null;
   disks?: Disk[];
-  cancelled_at?: string;
+  cancelled_at?: string | null;
+  kernel?: any | null;
+  backup_settings?: any;
+  permalink?: string;
+  attached_backup?: any | null;
+  advanced_features?: Record<string, boolean>;
 }
 
 export interface Region {
@@ -87,29 +112,37 @@ export interface Image {
   name: string;
   type: string;
   distribution?: string;
-  slug?: string;
+  full_name?: string;
+  slug?: string | null;
   public: boolean;
   regions: string[];
   min_disk_size?: number;
+  min_memory_megabytes?: number;
   size_gigabytes?: number;
   created_at: string;
-  description?: string;
+  description?: string | null;
   status: string;
-  error_message?: string;
+  error_message?: string | null;
   backup_type?: string;
+  distribution_surcharges?: any;
+  distribution_info?: any;
+  backup_info?: any;
 }
 
 export interface Size {
   slug: string;
   available: boolean;
   regions: string[];
+  regions_out_of_stock?: string[];
   price_monthly: number;
   price_hourly: number;
   disk: number;
   memory: number;
   transfer: number;
+  excess_transfer_cost_per_gigabyte?: number;
   vcpus: number;
   vcpu_units: string;
+  size_type?: string;
   options?: SizeOptions;
   description?: string;
   cpu_description?: string;
@@ -128,6 +161,11 @@ export interface SizeOptions {
 export interface Networks {
   v4: NetworkV4[];
   v6: NetworkV6[];
+  port_blocking?: boolean;
+  separate_private_network_interface?: boolean;
+  source_and_destination_check?: boolean;
+  recent_ddos?: boolean;
+  ipv6_reverse_nameservers?: string[];
 }
 
 export interface NetworkV4 {
@@ -597,23 +635,30 @@ export interface LicensedSoftware {
 }
 
 export interface SampleSet {
-  period_start: string;
-  period_end: string;
+  server_id: number;
+  period: {
+    start: string;
+    end: string;
+    data_interval: string;
+  };
   average?: SampleData;
-  maximum?: SampleData;
+  maximum_memory_megabytes?: number;
+  maximum_storage_gigabytes?: number;
+  // Legacy fields from v1 types (may appear in historical metrics)
   data?: SampleData[];
 }
 
 export interface SampleData {
-  cpu: number;
-  storage_requests: number;
-  network_incoming: number;
-  network_outgoing: number;
-  disk_read: number;
-  disk_write: number;
-  memory_used?: number;
-  memory_cached?: number;
-  timestamp?: string;
+  cpu_usage_percent: number;
+  cpu_usage_detailed?: number[];
+  memory_usage_bytes: number;
+  network_incoming_kbps: number;
+  network_outgoing_kbps: number;
+  storage_usage_megabytes: number;
+  storage_read_kbps: number;
+  storage_write_kbps: number;
+  storage_read_requests_per_second: number;
+  storage_write_requests_per_second: number;
 }
 
 export interface UploadImageRequest {

@@ -27,7 +27,33 @@ export class SafetyInterceptor {
   private auditLog: AuditEntry[] = [];
 
   /**
+   * Track a method call for audit logging.
+   * Called explicitly by the bound wrappers in globals.ts.
+   */
+  trackCall(method: string, args: unknown[]): void {
+    const methodName = method.split('.').pop() || method;
+    const isDestructive = DESTRUCTIVE_PATTERNS.some(p => p.test(methodName));
+    const isMutating = MUTATING_PATTERNS.some(p => p.test(methodName));
+
+    if (isDestructive || isMutating) {
+      const entry: AuditEntry = {
+        timestamp: new Date().toISOString(),
+        method,
+        args: this.sanitizeArgs(args),
+        destructive: isDestructive,
+      };
+
+      this.auditLog.push(entry);
+
+      if (isDestructive) {
+        console.error(JSON.stringify({ audit: true, ...entry }));
+      }
+    }
+  }
+
+  /**
    * Wrap a client object with a Proxy that intercepts and logs method calls.
+   * Kept for backwards compatibility with tests.
    */
   wrapClient<T extends object>(client: T, prefix: string): T {
     return new Proxy(client, {
@@ -38,25 +64,7 @@ export class SafetyInterceptor {
         const methodName = prop;
 
         return (...args: unknown[]) => {
-          const isDestructive = DESTRUCTIVE_PATTERNS.some(p => p.test(methodName));
-          const isMutating = MUTATING_PATTERNS.some(p => p.test(methodName));
-
-          if (isDestructive || isMutating) {
-            const entry: AuditEntry = {
-              timestamp: new Date().toISOString(),
-              method: `${prefix}.${methodName}`,
-              args: this.sanitizeArgs(args),
-              destructive: isDestructive,
-            };
-
-            this.auditLog.push(entry);
-
-            // Log destructive operations to stderr
-            if (isDestructive) {
-              console.error(JSON.stringify({ audit: true, ...entry }));
-            }
-          }
-
+          this.trackCall(`${prefix}.${methodName}`, args);
           return (value as Function).apply(target, args);
         };
       },

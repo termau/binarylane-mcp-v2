@@ -303,17 +303,23 @@ params?: {
     returnDetails: `{ sample_sets: SampleSet[], links?, meta? }
 
 SampleSet includes:
-  period_start, period_end: string (ISO 8601)
+  server_id: number
+  period: { start, end, data_interval }
   average?: SampleData — Period averages
-  maximum?: SampleData — Period maximums
-  data?: SampleData[] — Individual data points
+  maximum_memory_megabytes?: number
+  maximum_storage_gigabytes?: number
 
 SampleData fields:
-  cpu: number (percentage)
-  network_incoming, network_outgoing: number (bytes)
-  disk_read, disk_write: number (bytes)
-  storage_requests: number
-  memory_used, memory_cached: number (bytes, optional)`,
+  cpu_usage_percent: number (0-100)
+  cpu_usage_detailed?: number[] (per-vCPU breakdown)
+  memory_usage_bytes: number
+  network_incoming_kbps: number
+  network_outgoing_kbps: number
+  storage_usage_megabytes: number
+  storage_read_kbps: number
+  storage_write_kbps: number
+  storage_read_requests_per_second: number
+  storage_write_requests_per_second: number`,
     examples: [
       `// Last hour of 5-minute metrics
 const { sample_sets } = await bl.getServerMetrics(123, { data_interval: 'five-minute' })`,

@@ -153,15 +153,13 @@ export class BinaryLaneClient {
           if (response.status === 204) return {} as T;
 
           const text = await response.text();
-          if (!text) return {} as T;
-          const data = JSON.parse(text);
 
           if (!response.ok) {
-            const error = data as ApiErrorResponse;
+            const errorData = text ? JSON.parse(text) as ApiErrorResponse : {};
             const apiError = new ApiError(
-              error.detail || error.title || `API error: ${response.status}`,
+              errorData.detail || errorData.title || `API error: ${response.status}`,
               response.status,
-              error
+              errorData
             );
 
             if (attempt < this.retryConfig.maxRetries && this.shouldRetry(response.status)) {
@@ -176,7 +174,8 @@ export class BinaryLaneClient {
             throw apiError;
           }
 
-          return data as T;
+          if (!text) return {} as T;
+          return JSON.parse(text) as T;
         } catch (error) {
           if (error instanceof ApiError) throw error;
 
