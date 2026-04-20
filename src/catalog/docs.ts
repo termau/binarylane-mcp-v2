@@ -364,13 +364,13 @@ export const methodDocs: Record<string, MethodDoc> = {
     "name": "bl.listNameservers",
     "fullDescription": "List All Public Nameservers",
     "parameterDetails": "  None",
-    "returnDetails": "{ local_nameservers: object[] }",
+    "returnDetails": "{ nameservers: Nameserver[] }",
     "examples": []
   },
   "bl.refreshNameserverCache": {
     "name": "bl.refreshNameserverCache",
     "fullDescription": "Refresh Cached Nameserver Domain Records",
-    "parameterDetails": "Request body:\n  domain_names: array (optional) — The domain names to refresh.",
+    "parameterDetails": "  domainName: string — The domain name to refresh",
     "returnDetails": "void",
     "examples": []
   },
@@ -378,7 +378,7 @@ export const methodDocs: Record<string, MethodDoc> = {
     "name": "bl.listIpv6ReverseName",
     "fullDescription": "Fetch all Existing IPv6 Name Server Records",
     "parameterDetails": "  page: integer (optional) — The selected page. Page numbering starts at 1\n  per_page: integer (optional) — The number of results to show per page.",
-    "returnDetails": "{ meta: object, links: object, reverse_nameservers: object[] }",
+    "returnDetails": "{ reverse_names: ReverseName[], links?, meta? }",
     "examples": []
   },
   "bl.listVpcs": {

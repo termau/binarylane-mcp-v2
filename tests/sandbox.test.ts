@@ -299,6 +299,37 @@ describe('Sandbox', () => {
       const result = await sandbox.execute('return typeof __hostCall__');
       expect(result.result).toBe('undefined');
     });
+
+    it('should not leak host Function via console.log.constructor', async () => {
+      const result = await sandbox.execute(`
+        try {
+          const F = console.log.constructor;
+          return typeof F('return process')();
+        } catch(e) {
+          return 'blocked';
+        }
+      `);
+      expect(result.result).not.toBe('object');
+    });
+
+    it('should not leak host Function via setTimeout.constructor', async () => {
+      const result = await sandbox.execute(`
+        try {
+          const F = setTimeout.constructor;
+          return typeof F('return process')();
+        } catch(e) {
+          return 'blocked';
+        }
+      `);
+      expect(result.result).not.toBe('object');
+    });
+
+    it('should not expose __hostSetTimeout__ or __hostClearTimeout__', async () => {
+      const result = await sandbox.execute(`
+        return [typeof __hostSetTimeout__, typeof __hostClearTimeout__];
+      `);
+      expect(result.result).toEqual(['undefined', 'undefined']);
+    });
   });
 
   describe('timeout handling', () => {

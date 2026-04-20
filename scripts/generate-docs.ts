@@ -93,6 +93,18 @@ const METHOD_MAP: Record<string, { path: string; method: string }> = {
   'bl.listSoftwareForOS': { path: '/v2/software/operating_system/{operating_system_id_or_slug}', method: 'get' },
 };
 
+// Override return types where the OpenAPI spec doesn't match the actual client
+const RETURN_OVERRIDES: Record<string, string> = {
+  'bl.listNameservers': '{ nameservers: Nameserver[] }',
+  'bl.refreshNameserverCache': 'void',
+  'bl.listIpv6ReverseName': '{ reverse_names: ReverseName[], links?, meta? }',
+};
+
+// Override parameter details where spec doesn't match client
+const PARAM_OVERRIDES: Record<string, string> = {
+  'bl.refreshNameserverCache': '  domainName: string — The domain name to refresh',
+};
+
 // Platform-specific gotchas to inject (these can't come from the spec)
 const GOTCHAS: Record<string, string[]> = {
   'bl.performServerAction': [
@@ -244,8 +256,9 @@ for (const [methodName, { path, method }] of Object.entries(METHOD_MAP)) {
 
   if (!paramDetails) paramDetails = '  None';
 
-  // Build response details
-  const returnDetails = getResponseSchema(spec, operation);
+  // Apply overrides where OpenAPI spec doesn't match actual client
+  if (PARAM_OVERRIDES[methodName]) paramDetails = PARAM_OVERRIDES[methodName];
+  const returnDetails = RETURN_OVERRIDES[methodName] || getResponseSchema(spec, operation);
 
   // Build the doc entry
   docs[methodName] = {

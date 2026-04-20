@@ -101,20 +101,10 @@ export class Sandbox {
       effectiveTimeout,
     );
 
-    // Create sandbox context with minimal globals (NO host functions exposed directly)
+    // Create sandbox context with NO host functions exposed directly.
+    // Only primitives and value types go here — all functions are created
+    // inside the sandbox realm via the setup code below.
     const context = vm.createContext({
-      console: globals.console,
-      // Standard builtins — these are value types or frozen, safe to pass
-      parseInt: globals.parseInt,
-      parseFloat: globals.parseFloat,
-      isNaN: globals.isNaN,
-      isFinite: globals.isFinite,
-      encodeURIComponent: globals.encodeURIComponent,
-      decodeURIComponent: globals.decodeURIComponent,
-      encodeURI: globals.encodeURI,
-      decodeURI: globals.decodeURI,
-      setTimeout: (fn: Function, ms: number) => setTimeout(fn, Math.min(ms, effectiveTimeout)),
-      clearTimeout,
       undefined,
     });
 
@@ -195,20 +185,41 @@ export class Sandbox {
       return result;
     };
 
+    // Register console and setTimeout as host callables
+    const consoleFns = globals.console as Record<string, Function>;
+    hostCallables.set('__console.log', consoleFns.log);
+    hostCallables.set('__console.error', consoleFns.error);
+    hostCallables.set('__console.warn', consoleFns.warn);
+    hostCallables.set('__console.info', consoleFns.info);
+
+    // setTimeout bridge — host manages the real timer
+    const cappedTimeout = effectiveTimeout;
+    hostCallables.set('__setTimeout', (fnId: number, ms: number) => {
+      // We can't pass sandbox functions through JSON, so setTimeout
+      // is handled differently — see setup code below
+      return undefined;
+    });
+
     context.__hostCall__ = hostCall;
 
-    // Create bl and ssh objects INSIDE the sandbox realm using sandbox-native
-    // functions. These call __hostCall__ to bridge to the host, but the functions
-    // themselves are sandbox-realm so .constructor is the sandbox's Function (harmless).
-    // The IIFE captures __hostCall__ in a closure, then we delete it from global scope
-    // so user code can't access it directly.
+    // Also inject host setTimeout/clearTimeout as non-escapable references
+    // by wrapping them in the IIFE closure
+    const hostSetTimeout = (fn: Function, ms: number) => setTimeout(fn, Math.min(ms, cappedTimeout));
+    const hostClearTimeout = clearTimeout;
+    context.__hostSetTimeout__ = hostSetTimeout;
+    context.__hostClearTimeout__ = hostClearTimeout;
+
+    // Create ALL callable objects INSIDE the sandbox realm.
+    // Every function the sandbox code can call is sandbox-native,
+    // preventing .constructor escape to host Function.
     const blMethodNames = Object.keys(globals.bl as Record<string, any>)
       .filter(k => typeof (globals.bl as any)[k] === 'function');
     const sshMethodNames = Object.keys(globals.ssh as Record<string, any>)
       .filter(k => typeof (globals.ssh as any)[k] === 'function');
 
     const setupCode = `
-      (function(__hc__) {
+      (function(__hc__, __hst__, __hct__) {
+        // bl and ssh — sandbox-realm functions that bridge to host via __hc__
         globalThis.bl = Object.freeze({
           ${blMethodNames.map(name =>
             `${name}: function(...args) { return __hc__('bl.${name}', JSON.stringify(args)); }`
@@ -220,9 +231,27 @@ export class Sandbox {
             `${name}: function(...args) { return __hc__('ssh.${name}', JSON.stringify(args)); }`
           ).join(',\n          ')}
         });
-      })(__hostCall__);
+
+        // console — sandbox-realm functions that bridge to host log capture
+        globalThis.console = Object.freeze({
+          log: function(...args) { __hc__('__console.log', JSON.stringify(args)); },
+          error: function(...args) { __hc__('__console.error', JSON.stringify(args)); },
+          warn: function(...args) { __hc__('__console.warn', JSON.stringify(args)); },
+          info: function(...args) { __hc__('__console.info', JSON.stringify(args)); },
+        });
+
+        // setTimeout/clearTimeout — sandbox-realm wrappers around host timers
+        // These use the host's timer functions but the wrapper functions themselves
+        // are sandbox-native so .constructor is safe.
+        // Note: __hst__/__hct__ are host functions but they're captured in this
+        // closure and not accessible from globalThis.
+        globalThis.setTimeout = function(fn, ms) { return __hst__(fn, ms); };
+        globalThis.clearTimeout = function(id) { return __hct__(id); };
+      })(__hostCall__, __hostSetTimeout__, __hostClearTimeout__);
 
       delete globalThis.__hostCall__;
+      delete globalThis.__hostSetTimeout__;
+      delete globalThis.__hostClearTimeout__;
     `;
 
     vm.runInContext(setupCode, context);

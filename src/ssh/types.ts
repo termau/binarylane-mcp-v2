@@ -16,7 +16,7 @@ export interface SSHConnection {
 export interface CommandResult {
   stdout: string;
   stderr: string;
-  code: number;
+  code: number | null; // null if process was killed/signalled without exit code
 }
 
 export interface FileEntry {

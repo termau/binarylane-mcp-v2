@@ -214,7 +214,7 @@ export class SSHClientManager {
         stream.on('close', (code: number) => {
           clearTimeout(timeoutId);
           cleanup();
-          resolve({ stdout, stderr, code: code || 0 });
+          resolve({ stdout, stderr, code: code ?? null });
         });
         stream.on('data', (data: Buffer) => { stdout += data.toString(); });
         stream.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
