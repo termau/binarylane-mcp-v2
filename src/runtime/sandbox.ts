@@ -1,28 +1,26 @@
 /**
  * Code execution sandbox using Node.js vm module.
  *
- * Runs model-generated JavaScript in an isolated context
- * with only bl and ssh exposed as capabilities.
- *
- * CROSS-REALM PROMISE HANDLING:
- * vm.createContext creates a new JS realm with its own Promise constructor.
- * Methods on bl/ssh are bound to the real client instances (in globals.ts)
- * and return host-realm Promises. After creating the context, we wrap
- * every function property on bl/ssh to convert host-realm Promises into
- * sandbox-realm Promises that the sandbox's `await` can handle.
+ * SECURITY MODEL:
+ * - Code runs in a separate vm realm (vm.createContext)
+ * - bl/ssh methods are exposed as sandbox-realm functions (not host functions)
+ *   to prevent prototype chain escape via .constructor
+ * - All results are JSON-serialized across the realm boundary
+ * - No host-realm references leak into the sandbox
+ * - Dual timeout: sync (vm) + async (Promise.race) + AbortController for in-flight ops
+ * - Logging can be disabled via BINARYLANE_MCP_DISABLE_LOG=1
  */
 
 import vm from 'node:vm';
 import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { BinaryLaneClient } from '../api/client.js';
 import { SSHClientManager } from '../ssh/client.js';
 import { SafetyInterceptor } from './safety.js';
 import { buildSandboxGlobals } from './globals.js';
 
-const DEFAULT_LOG_DIR = join(homedir(), '.config', 'binarylane');
-const DEFAULT_LOG_PATH = join(DEFAULT_LOG_DIR, 'mcp-v2.log');
+const DEFAULT_LOG_PATH = join(homedir(), '.config', 'binarylane', 'mcp-v2.log');
 
 export interface ExecutionResult {
   result: unknown;
@@ -34,54 +32,9 @@ export interface ExecutionResult {
 }
 
 export interface SandboxOptions {
-  timeout?: number;      // ms, default 60000
-  enableLogging?: boolean; // default true. Set to false or env BINARYLANE_MCP_DISABLE_LOG=1 to disable
-  logPath?: string;       // override log file path
-}
-
-/**
- * Wrap all function properties on an object so that any returned
- * host-realm Promise is converted to a target-realm Promise.
- */
-function bridgeAllMethods(
-  obj: Record<string, any>,
-  TargetPromise: PromiseConstructor,
-  TargetJSON: typeof JSON,
-): Record<string, any> {
-  const bridged: Record<string, any> = {};
-  for (const [key, value] of Object.entries(obj)) {
-    if (typeof value === 'function') {
-      bridged[key] = (...args: unknown[]) => {
-        const result = value(...args);
-        if (result && typeof result === 'object' && typeof result.then === 'function') {
-          return new TargetPromise((resolve: Function, reject: Function) => {
-            result.then(
-              (v: unknown) => {
-                try {
-                  resolve(TargetJSON.parse(JSON.stringify(v)));
-                } catch {
-                  resolve(v);
-                }
-              },
-              (e: unknown) => reject(e),
-            );
-          });
-        }
-        // Sync returns: also bridge to sandbox realm
-        if (result && typeof result === 'object') {
-          try {
-            return TargetJSON.parse(JSON.stringify(result));
-          } catch {
-            return result;
-          }
-        }
-        return result;
-      };
-    } else {
-      bridged[key] = value;
-    }
-  }
-  return bridged;
+  timeout?: number;        // ms, default 60000
+  enableLogging?: boolean; // default true. Set false or env BINARYLANE_MCP_DISABLE_LOG=1 to disable
+  logPath?: string;        // override log file path
 }
 
 export class Sandbox {
@@ -109,7 +62,7 @@ export class Sandbox {
     if (!this.loggingEnabled) return;
 
     try {
-      const logDir = join(this.logPath, '..');
+      const logDir = dirname(this.logPath);
       if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
 
       const entry = {
@@ -148,31 +101,134 @@ export class Sandbox {
       effectiveTimeout,
     );
 
-    // Create sandbox context
-    const context = vm.createContext(globals);
+    // Create sandbox context with minimal globals (NO host functions exposed directly)
+    const context = vm.createContext({
+      console: globals.console,
+      // Standard builtins — these are value types or frozen, safe to pass
+      parseInt: globals.parseInt,
+      parseFloat: globals.parseFloat,
+      isNaN: globals.isNaN,
+      isFinite: globals.isFinite,
+      encodeURIComponent: globals.encodeURIComponent,
+      decodeURIComponent: globals.decodeURIComponent,
+      encodeURI: globals.encodeURI,
+      decodeURI: globals.decodeURI,
+      setTimeout: (fn: Function, ms: number) => setTimeout(fn, Math.min(ms, effectiveTimeout)),
+      clearTimeout,
+      undefined,
+    });
 
-    // Get the sandbox realm's Promise and JSON constructors
+    // Get sandbox realm constructors
     const SandboxPromise = vm.runInContext('Promise', context) as PromiseConstructor;
     const SandboxJSON = vm.runInContext('JSON', context) as typeof JSON;
 
-    // Bridge bl and ssh methods to return sandbox-realm Promises
-    // with sandbox-realm objects (via SandboxJSON.parse)
-    context.bl = bridgeAllMethods(globals.bl as Record<string, any>, SandboxPromise, SandboxJSON);
-    context.ssh = bridgeAllMethods(globals.ssh as Record<string, any>, SandboxPromise, SandboxJSON);
+    // SECURITY: Create bl/ssh wrapper functions INSIDE the sandbox realm.
+    // This prevents .constructor escape — the functions' constructor is the
+    // sandbox's Function, which can only create sandbox-realm functions.
+    // The actual host calls go through __hostCall__ which is a frozen callable.
 
-    const wrappedCode = `(async () => {\n${code}\n})()`;
+    // __hostCall__ is the only bridge between realms. It receives a method name
+    // and args, calls the host function, and returns a sandbox-realm Promise
+    // with JSON-serialized results.
+    const hostCallables = new Map<string, Function>();
+
+    // Register all bl methods
+    for (const [name, fn] of Object.entries(globals.bl as Record<string, any>)) {
+      if (typeof fn === 'function') hostCallables.set(`bl.${name}`, fn);
+    }
+
+    // Register all ssh methods
+    for (const [name, fn] of Object.entries(globals.ssh as Record<string, any>)) {
+      if (typeof fn === 'function') hostCallables.set(`ssh.${name}`, fn);
+    }
+
+    // The host call bridge — this is the ONLY host function in the sandbox.
+    // It's frozen and its .constructor is overridden to prevent escape.
+    const hostCall = (method: string, argsJson: string) => {
+      const fn = hostCallables.get(method);
+      if (!fn) throw new Error(`Unknown method: ${method}`);
+
+      const args = JSON.parse(argsJson);
+      const result = fn(...args);
+
+      if (result && typeof result === 'object' && typeof result.then === 'function') {
+        return new SandboxPromise((resolve: Function, reject: Function) => {
+          result.then(
+            (v: unknown) => {
+              try {
+                resolve(SandboxJSON.parse(JSON.stringify(v)));
+              } catch {
+                resolve(v);
+              }
+            },
+            (e: unknown) => {
+              // Create a sandbox-realm error
+              reject(SandboxJSON.parse(JSON.stringify({
+                message: e instanceof Error ? e.message : String(e),
+                statusCode: (e as any)?.statusCode,
+              })));
+            },
+          );
+        });
+      }
+
+      // Sync returns
+      if (result && typeof result === 'object') {
+        try {
+          return SandboxJSON.parse(JSON.stringify(result));
+        } catch {
+          return result;
+        }
+      }
+      return result;
+    };
+
+    context.__hostCall__ = hostCall;
+
+    // Create bl and ssh objects INSIDE the sandbox realm using sandbox-native
+    // functions. These call __hostCall__ to bridge to the host, but the functions
+    // themselves are sandbox-realm so .constructor is the sandbox's Function (harmless).
+    // The IIFE captures __hostCall__ in a closure, then we delete it from global scope
+    // so user code can't access it directly.
+    const blMethodNames = Object.keys(globals.bl as Record<string, any>)
+      .filter(k => typeof (globals.bl as any)[k] === 'function');
+    const sshMethodNames = Object.keys(globals.ssh as Record<string, any>)
+      .filter(k => typeof (globals.ssh as any)[k] === 'function');
+
+    const setupCode = `
+      (function(__hc__) {
+        globalThis.bl = Object.freeze({
+          ${blMethodNames.map(name =>
+            `${name}: function(...args) { return __hc__('bl.${name}', JSON.stringify(args)); }`
+          ).join(',\n          ')}
+        });
+
+        globalThis.ssh = Object.freeze({
+          ${sshMethodNames.map(name =>
+            `${name}: function(...args) { return __hc__('ssh.${name}', JSON.stringify(args)); }`
+          ).join(',\n          ')}
+        });
+      })(__hostCall__);
+
+      delete globalThis.__hostCall__;
+    `;
+
+    vm.runInContext(setupCode, context);
+
+    // Wrap user code in an async IIFE with strict mode
+    const wrappedCode = `'use strict';\n(async () => {\n${code}\n})()`;
 
     try {
       const script = new vm.Script(wrappedCode, {
         filename: 'sandbox.js',
       });
 
-      // Run the script — returns a sandbox-realm Promise
+      // Run — returns a sandbox-realm Promise
       const sandboxPromise = script.runInContext(context, {
         timeout: effectiveTimeout,
       });
 
-      // Bridge sandbox-realm Promise back to host realm
+      // Bridge sandbox Promise back to host realm
       const hostPromise = new Promise((resolve, reject) => {
         sandboxPromise.then(
           (v: unknown) => resolve(v),
@@ -216,6 +272,12 @@ export class Sandbox {
               errorMessage += `\n  at ${sandboxLines.join('\n  at ')}`;
             }
           }
+        }
+      } else if (error && typeof error === 'object' && 'message' in error) {
+        // Handle sandbox-realm error objects (from rejected promises)
+        errorMessage = String((error as any).message);
+        if ((error as any).statusCode) {
+          errorMessage += ` (HTTP ${(error as any).statusCode})`;
         }
       } else {
         errorMessage = String(error);

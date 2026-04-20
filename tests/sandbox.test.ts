@@ -226,6 +226,81 @@ describe('Sandbox', () => {
     });
   });
 
+  describe('sandbox escape prevention', () => {
+    it('should not leak host Function constructor via bl methods', async () => {
+      const result = await sandbox.execute(`
+        try {
+          const ctor = bl.listServers.constructor;
+          const fn = ctor('return process');
+          return fn();
+        } catch(e) {
+          return 'blocked: ' + e.message;
+        }
+      `);
+      // Should either be undefined (no constructor) or throw, never return process
+      expect(result.result).not.toHaveProperty('env');
+      expect(result.result).not.toHaveProperty('exit');
+    });
+
+    it('should not allow access to process via Function constructor', async () => {
+      const result = await sandbox.execute(`
+        try {
+          const F = (function(){}).constructor;
+          return typeof F('return process')();
+        } catch(e) {
+          return 'blocked';
+        }
+      `);
+      // Sandbox Function constructor creates sandbox-realm functions
+      // which don't have access to host process
+      expect(result.result).not.toBe('object');
+    });
+
+    it('should not allow require via constructor escape', async () => {
+      const result = await sandbox.execute(`
+        try {
+          const F = (function(){}).constructor;
+          const r = F('return require')();
+          return typeof r;
+        } catch(e) {
+          return 'blocked';
+        }
+      `);
+      expect(result.result).toBe('blocked');
+    });
+
+    it('should not allow __proto__ traversal to host objects', async () => {
+      const result = await sandbox.execute(`
+        try {
+          const proto = bl.__proto__;
+          return typeof proto;
+        } catch(e) {
+          return 'blocked';
+        }
+      `);
+      // bl is Object.freeze'd, proto should be sandbox Object.prototype
+      // which is harmless
+      expect(result.result).not.toBe('function');
+    });
+
+    it('should have frozen bl and ssh objects', async () => {
+      const result = await sandbox.execute(`
+        try {
+          bl.evil = function() { return 'hacked'; };
+          return bl.evil ? 'mutable' : 'frozen';
+        } catch(e) {
+          return 'frozen';
+        }
+      `);
+      expect(result.result).toBe('frozen');
+    });
+
+    it('should not expose __hostCall__ directly', async () => {
+      const result = await sandbox.execute('return typeof __hostCall__');
+      expect(result.result).toBe('undefined');
+    });
+  });
+
   describe('timeout handling', () => {
     it('should timeout on sync infinite loops', async () => {
       const result = await sandbox.execute('while(true) {}', 100);
