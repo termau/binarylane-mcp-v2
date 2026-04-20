@@ -21,8 +21,8 @@ import { SSHClientManager } from '../ssh/client.js';
 import { SafetyInterceptor } from './safety.js';
 import { buildSandboxGlobals } from './globals.js';
 
-const LOG_DIR = join(homedir(), '.config', 'binarylane');
-const LOG_PATH = join(LOG_DIR, 'mcp-v2.log');
+const DEFAULT_LOG_DIR = join(homedir(), '.config', 'binarylane');
+const DEFAULT_LOG_PATH = join(DEFAULT_LOG_DIR, 'mcp-v2.log');
 
 export interface ExecutionResult {
   result: unknown;
@@ -34,7 +34,9 @@ export interface ExecutionResult {
 }
 
 export interface SandboxOptions {
-  timeout?: number; // ms, default 60000
+  timeout?: number;      // ms, default 60000
+  enableLogging?: boolean; // default true. Set to false or env BINARYLANE_MCP_DISABLE_LOG=1 to disable
+  logPath?: string;       // override log file path
 }
 
 /**
@@ -87,6 +89,8 @@ export class Sandbox {
   private sshClient: SSHClientManager;
   private safety: SafetyInterceptor;
   private defaultTimeout: number;
+  private loggingEnabled: boolean;
+  private logPath: string;
 
   constructor(
     blClient: BinaryLaneClient,
@@ -97,11 +101,16 @@ export class Sandbox {
     this.sshClient = sshClient;
     this.safety = new SafetyInterceptor();
     this.defaultTimeout = options?.timeout ?? 60000;
+    this.loggingEnabled = (options?.enableLogging ?? true) && !process.env.BINARYLANE_MCP_DISABLE_LOG;
+    this.logPath = options?.logPath ?? DEFAULT_LOG_PATH;
   }
 
   private writeLog(code: string, result: ExecutionResult): void {
+    if (!this.loggingEnabled) return;
+
     try {
-      if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+      const logDir = join(this.logPath, '..');
+      if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
 
       const entry = {
         timestamp: new Date().toISOString(),
@@ -117,7 +126,7 @@ export class Sandbox {
         code: code.trim(),
       };
 
-      appendFileSync(LOG_PATH, JSON.stringify(entry) + '\n');
+      appendFileSync(this.logPath, JSON.stringify(entry) + '\n');
     } catch {
       // Don't let logging failures break execution
     }
