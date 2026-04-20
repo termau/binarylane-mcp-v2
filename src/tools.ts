@@ -49,7 +49,7 @@ Available globals:
 - console.log() — Output is captured and returned
 - Standard JS: JSON, Promise, Array, Object, Map, Set, Date, Math, setTimeout
 
-Code runs as async — use await directly. The return value of the last expression is captured as the result.
+Code runs as async — use await directly. Use explicit 'return' to capture a result.
 
 Use the 'search' tool first to discover available methods and their signatures.`,
     inputSchema: {

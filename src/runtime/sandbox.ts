@@ -142,9 +142,20 @@ export class Sandbox {
       if (typeof fn === 'function') hostCallables.set(`ssh.${name}`, fn);
     }
 
+    // Abort flag — set when execution times out to prevent new host calls
+    // and short-circuit pending promise resolutions
+    let aborted = false;
+
     // The host call bridge — this is the ONLY host function in the sandbox.
-    // It's frozen and its .constructor is overridden to prevent escape.
     const hostCall = (method: string, argsJson: string) => {
+      if (aborted) {
+        return new SandboxPromise((_: Function, reject: Function) => {
+          reject(SandboxJSON.parse(JSON.stringify({
+            message: 'Execution aborted (timeout)',
+          })));
+        });
+      }
+
       const fn = hostCallables.get(method);
       if (!fn) throw new Error(`Unknown method: ${method}`);
 
@@ -155,6 +166,7 @@ export class Sandbox {
         return new SandboxPromise((resolve: Function, reject: Function) => {
           result.then(
             (v: unknown) => {
+              if (aborted) return; // Discard result after timeout
               try {
                 resolve(SandboxJSON.parse(JSON.stringify(v)));
               } catch {
@@ -162,7 +174,7 @@ export class Sandbox {
               }
             },
             (e: unknown) => {
-              // Create a sandbox-realm error
+              if (aborted) return;
               reject(SandboxJSON.parse(JSON.stringify({
                 message: e instanceof Error ? e.message : String(e),
                 statusCode: (e as any)?.statusCode,
@@ -236,15 +248,15 @@ export class Sandbox {
         );
       });
 
-      // Race against async timeout
-      const result = await Promise.race([
-        hostPromise,
-        new Promise((_, reject) => {
-          setTimeout(() => {
-            reject(new Error(`Execution timed out after ${effectiveTimeout}ms`));
-          }, effectiveTimeout);
-        }),
-      ]);
+      // Race against async timeout — also sets abort flag to stop in-flight ops
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => {
+          aborted = true;
+          reject(new Error(`Execution timed out after ${effectiveTimeout}ms`));
+        }, effectiveTimeout);
+      });
+
+      const result = await Promise.race([hostPromise, timeoutPromise]);
 
       const execResult: ExecutionResult = {
         result,
