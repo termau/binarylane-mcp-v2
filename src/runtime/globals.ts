@@ -18,6 +18,7 @@ export interface SandboxSSH {
   download: SSHClientManager['download'];
   connections: () => ReturnType<SSHClientManager['listConnections']>;
   testConnection: SSHClientManager['testConnection'];
+  refresh: () => Promise<void>;
 }
 
 /**
@@ -106,6 +107,7 @@ export function buildSandboxGlobals(
       return result;
     },
     testConnection: trackedSsh('testConnection', sshClient.testConnection.bind(sshClient)),
+    refresh: trackedSsh('refresh', sshClient.initialize.bind(sshClient)),
   };
 
   const formatArg = (a: unknown) =>

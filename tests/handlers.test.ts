@@ -21,6 +21,7 @@ function createTestSandbox() {
     download: vi.fn().mockResolvedValue(undefined),
     listConnections: vi.fn().mockReturnValue([]),
     testConnection: vi.fn().mockResolvedValue({ success: true }),
+    initialize: vi.fn().mockResolvedValue(undefined),
   } as unknown as SSHClientManager;
 
   return new Sandbox(blClient, sshClient, { timeout: 5000 });

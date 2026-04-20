@@ -37,6 +37,7 @@ function createMockClients() {
       { name: 'web-1', host: '1.2.3.4', port: 22, username: 'root' },
     ]),
     testConnection: vi.fn().mockResolvedValue({ success: true, message: 'ok', latencyMs: 42 }),
+    initialize: vi.fn().mockResolvedValue(undefined),
   } as unknown as SSHClientManager;
 
   return { blClient, sshClient };

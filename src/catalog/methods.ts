@@ -973,4 +973,13 @@ export const methodCatalog: CatalogEntry[] = [
     destructive: false,
     idempotent: true,
   },
+  {
+    name: 'ssh.refresh',
+    description: 'Re-discover SSH connections from config and BinaryLane API. Use after creating/deleting servers to update available connections without restarting the MCP.',
+    parameters: [],
+    returnType: 'void',
+    tags: ['ssh', 'connections', 'refresh', 'discovery'],
+    destructive: false,
+    idempotent: true,
+  },
 ];
