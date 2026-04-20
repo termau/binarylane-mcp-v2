@@ -160,7 +160,7 @@ describe('formatMethodDoc', () => {
     expect(doc).toContain('## Parameters');
     expect(doc).toContain('## Examples');
     expect(doc).toContain('## Gotchas');
-    expect(doc).toContain('firewall_rules');
+    expect(doc).toContain('STATELESS');
   });
 
   it('should return detailed docs for ssh.run', () => {
@@ -182,10 +182,10 @@ describe('formatMethodDoc', () => {
     expect(doc).toBeNull();
   });
 
-  it('should include related methods when available', () => {
-    const doc = formatMethodDoc('bl.createLoadBalancer');
-    expect(doc).toContain('## Related');
-    expect(doc).toContain('bl.addServersToLoadBalancer');
+  it('should include gotchas for server creation', () => {
+    const doc = formatMethodDoc('bl.createServer');
+    expect(doc).toContain('## Gotchas');
+    expect(doc).toContain('alphanumeric');
   });
 
   it('should include gotchas for load balancer creation', () => {
