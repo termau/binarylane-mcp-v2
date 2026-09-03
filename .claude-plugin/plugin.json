@@ -1,0 +1,10 @@
+{
+  "name": "binarylane-mcp",
+  "description": "Code Mode MCP server for BinaryLane — 3 tools instead of 86. Requires a BINARYLANE_API_TOKEN environment variable; get a token at https://home.binarylane.com.au/api-info",
+  "version": "2.0.0",
+  "author": {
+    "name": "BinaryLane"
+  },
+  "homepage": "https://github.com/termau/binarylane-mcp-v2",
+  "license": "MIT"
+}

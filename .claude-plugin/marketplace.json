@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "binarylane",
+  "description": "BinaryLane Claude Code plugins",
+  "owner": {
+    "name": "BinaryLane"
+  },
+  "plugins": [
+    {
+      "name": "binarylane-mcp",
+      "description": "Code Mode MCP server for BinaryLane. Exposes search/execute/describe instead of 86 individual tools — the model writes sandboxed JavaScript against the BinaryLane API (`bl`) and SSH (`ssh`) to manage servers, domains, DNS, VPCs, load balancers, images, and metrics.",
+      "author": {
+        "name": "BinaryLane"
+      },
+      "category": "infrastructure",
+      "source": "./",
+      "homepage": "https://github.com/termau/binarylane-mcp-v2"
+    }
+  ]
+}

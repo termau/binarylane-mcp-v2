@@ -8,6 +8,31 @@ Inspired by [Sunil Pai's "Code Mode" talk](https://www.youtube.com/watch?v=8txf0
 
 ## Quick Start
 
+### Install as a Claude Code plugin (recommended for teams)
+
+This repo doubles as its own plugin marketplace. Each person runs:
+
+```bash
+export BINARYLANE_API_TOKEN=your-token-here   # add to your shell profile
+```
+
+Then, inside Claude Code:
+
+```
+/plugin marketplace add termau/binarylane-mcp-v2
+/plugin install binarylane-mcp@binarylane
+```
+
+On first launch the plugin installs its dependencies and compiles itself, then
+starts automatically for every project.
+
+**Each person uses their own API token.** The plugin config reads
+`BINARYLANE_API_TOKEN` from your environment — no token is ever stored in this
+repo. Get yours at
+[home.binarylane.com.au/api-info](https://home.binarylane.com.au/api-info).
+
+### Manual install
+
 ```bash
 git clone https://github.com/termau/binarylane-mcp-v2.git
 cd binarylane-mcp-v2
@@ -22,8 +47,6 @@ claude mcp add binarylane -s user \
   -e BINARYLANE_API_TOKEN=your-token-here \
   -- node /path/to/binarylane-mcp-v2/dist/index.js
 ```
-
-Get your API token at [home.binarylane.com.au/api-info](https://home.binarylane.com.au/api-info).
 
 ## How It Works
 

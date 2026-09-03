@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "binarylane": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/plugin-launch.mjs"],
+      "env": {
+        "BINARYLANE_API_TOKEN": "${BINARYLANE_API_TOKEN}"
+      }
+    }
+  }
+}
